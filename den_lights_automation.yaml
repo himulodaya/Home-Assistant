@@ -1,6 +1,6 @@
 blueprint:
   name: Den Lights Automation
-  description: Controls den lights based on time, media player status, and door sensor.
+  description: Controls den lights based on time of day, TV status, and door sensor.
   domain: automation
   input:
     den_lights:
@@ -26,7 +26,7 @@ blueprint:
           domain: binary_sensor
     door_timer_duration:
       name: Door Open Brightness Duration
-      description: How long to keep lights at 60% after door opens (in minutes)
+      description: How long to keep lights at higher brightness after door opens (in minutes)
       default: 5
       selector:
         number:
@@ -47,14 +47,6 @@ blueprint:
       default: "00:00:00"
       selector:
         time: {}
-
-variables:
-  den_lights: !input den_lights
-  chromecast: !input chromecast
-  door_sensor: !input door_sensor
-  door_timer_duration: !input door_timer_duration
-  dimming_start_time: !input dimming_start_time
-  lights_off_time: !input lights_off_time
 
 # Multiple triggers
 trigger:
@@ -84,96 +76,142 @@ trigger:
 condition: []
 
 action:
+  # Calculate all variables first
   - variables:
       is_after_sunset: "{{ now() > (state_attr('sun.sun', 'next_rising') - timedelta(hours=12)) }}"
       is_before_sunrise: "{{ now() < state_attr('sun.sun', 'next_rising') }}"
       is_night_time: "{{ is_after_sunset and is_before_sunrise }}"
+      sunset_time: "{{ state_attr('sun.sun', 'next_setting') }}"
+      current_ts: "{{ now().timestamp() }}"
+      sunset_ts: "{{ as_timestamp(sunset_time) }}"
+      time_to_sunset: "{{ sunset_ts - current_ts }}"
+      is_pre_sunset_time: "{{ time_to_sunset >= 0 and time_to_sunset <= 1200 }}"
       is_daytime: "{{ not is_night_time and not is_pre_sunset_time }}"
-      is_pre_sunset_time: >
-        {% set sunset_time = as_timestamp(state_attr('sun.sun', 'next_setting')) %}
-        {% set current_time = as_timestamp(now()) %}
-        {% set time_diff = sunset_time - current_time %}
-        {{ time_diff >= 0 and time_diff <= 1200 }}
       is_tv_on: "{{ states(chromecast) == 'playing' or states(chromecast) == 'on' }}" 
-      is_after_dimming_time: >
-        {% set dimming_time = strptime(dimming_start_time, '%H:%M:%S').time() %}
-        {% set current_time = now().time() %}
-        {{ current_time >= dimming_time }}
-      is_after_lights_off_time: >
-        {% set off_time = strptime(lights_off_time, '%H:%M:%S').time() %}
-        {% set current_time = now().time() %}
-        {{ current_time >= off_time }}
+      dimming_time: "{{ strptime(dimming_start_time, '%H:%M:%S').time() }}"
+      current_time: "{{ now().time() }}"
+      is_after_dimming_time: "{{ current_time >= dimming_time }}"
+      off_time: "{{ strptime(lights_off_time, '%H:%M:%S').time() }}"
+      is_after_lights_off_time: "{{ current_time >= off_time }}"
       is_door_open: "{{ is_state(door_sensor, 'on') }}"
-      is_evening_time: "{{ (is_night_time or trigger.platform == 'sun' and trigger.event == 'sunset') and not is_after_dimming_time and not is_after_lights_off_time }}"
-
-  # Pre-sunset gradual turn on (20 minutes before sunset)
-  - if:
-      condition: "{{ is_pre_sunset_time and trigger.platform == 'sun' and trigger.event == 'sunset' }}"
-    then:
-      - variables:
-          time_to_sunset: >
-            {% set sunset_time = as_timestamp(state_attr('sun.sun', 'next_setting')) %}
-            {% set current_time = as_timestamp(now()) %}
-            {{ sunset_time - current_time }}
-          sunset_progress: "{{ 1 - (time_to_sunset / 1200) }}"
-          sunset_brightness: "{{ max(10, (sunset_progress * 100)) | round(0) }}"
-      - service: light.turn_on
-        target:
-          entity_id: !input den_lights
-        data:
-          brightness_pct: "{{ sunset_brightness }}"
-
-  # Door has just opened
-  - if:
-      condition: "{{ trigger.entity_id == door_sensor and trigger.to_state.state == 'on' }}"
-    then:
-      - variables:
-          brightness_level: >
-            {% if is_daytime or is_after_lights_off_time %}
-              100
-            {% elif is_tv_on %}
-              60
-            {% else %}
-              100
-            {% endif %}
-      - service: light.turn_on
-        target:
-          entity_id: !input den_lights
-        data:
-          brightness_pct: "{{ brightness_level }}"
-      # Handle daytime or after midnight
-      - if:
-          condition: "{{ is_daytime or is_after_lights_off_time }}"
-        then:
-          - delay:
-              minutes: !input door_timer_duration
-          # For daytime, always turn off after timer
-          - if:
-              condition: "{{ is_daytime }}"
-            then:
-              - service: light.turn_off
-                target:
-                  entity_id: !input den_lights
-          # For after midnight with TV on
-          - if:
-              condition: "{{ is_after_lights_off_time and is_tv_on }}"
-            then:
-              - service: light.turn_on
-                target:
-                  entity_id: !input den_lights
-                data:
-                  brightness_pct: 10
-            else:
-              - if:
-                  condition: "{{ is_after_lights_off_time }}"
-                then:
-                  - service: light.turn_off
+      is_evening_time: "{{ is_night_time and not is_after_dimming_time and not is_after_lights_off_time }}"
+      is_door_opened_trigger: "{{ trigger.entity_id == door_sensor and trigger.to_state.state == 'on' }}"
+      is_pre_sunset_trigger: "{{ trigger.platform == 'sun' and trigger.event == 'sunset' and is_pre_sunset_time }}"
+      is_tv_state_change: "{{ trigger.entity_id == chromecast }}"
+  
+  # Selective actions based on simplified conditions
+  - choose:
+      # Pre-sunset gradual turn on
+      - conditions:
+          - condition: template
+            value_template: "{{ is_pre_sunset_trigger }}"
+        sequence:
+          - variables:
+              sunset_progress: "{{ 1 - (time_to_sunset / 1200) }}"
+              sunset_brightness: "{{ max(10, (sunset_progress * 100)) | round(0) }}"
+          - service: light.turn_on
+            target:
+              entity_id: !input den_lights
+            data:
+              brightness_pct: "{{ sunset_brightness }}"
+      
+      # Door has just opened
+      - conditions:
+          - condition: template
+            value_template: "{{ is_door_opened_trigger }}"
+        sequence:
+          - variables:
+              brightness_level: >
+                {% if is_daytime or is_after_lights_off_time %}
+                  100
+                {% elif is_tv_on %}
+                  60
+                {% else %}
+                  100
+                {% endif %}
+          - service: light.turn_on
+            target:
+              entity_id: !input den_lights
+            data:
+              brightness_pct: "{{ brightness_level }}"
+          
+          # For daytime or after midnight
+          - choose:
+              - conditions:
+                  - condition: template
+                    value_template: "{{ is_daytime or is_after_lights_off_time }}"
+                sequence:
+                  - delay:
+                      minutes: !input door_timer_duration
+                  # Check conditions again after delay
+                  - choose:
+                      # Daytime - turn off after timer
+                      - conditions:
+                          - condition: template
+                            value_template: "{{ is_daytime }}"
+                        sequence:
+                          - service: light.turn_off
+                            target:
+                              entity_id: !input den_lights
+                      # After midnight with TV on
+                      - conditions:
+                          - condition: template
+                            value_template: "{{ is_after_lights_off_time and is_tv_on }}"
+                        sequence:
+                          - service: light.turn_on
+                            target:
+                              entity_id: !input den_lights
+                            data:
+                              brightness_pct: 10
+                    default:
+                      # After midnight, no TV
+                      - service: light.turn_off
+                        target:
+                          entity_id: !input den_lights
+              
+              # Evening with TV on
+              - conditions:
+                  - condition: template
+                    value_template: "{{ not is_daytime and not is_after_lights_off_time and is_tv_on }}"
+                sequence:
+                  - delay:
+                      minutes: !input door_timer_duration
+                  - service: light.turn_on
                     target:
                       entity_id: !input den_lights
-      # For evening with TV on
-      - if:
-          condition: "{{ not is_daytime and not is_after_lights_off_time and is_tv_on }}"
-        then:
+                    data:
+                      brightness_pct: 10
+      
+      # TV state change during daytime
+      - conditions:
+          - condition: template
+            value_template: "{{ is_daytime and is_tv_state_change }}"
+        sequence:
+          - service: light.turn_off
+            target:
+              entity_id: !input den_lights
+      
+      # TV on during evening/night without door open
+      - conditions:
+          - condition: template
+            value_template: "{{ not is_daytime and is_tv_state_change and is_tv_on and not is_door_open }}"
+        sequence:
+          - service: light.turn_on
+            target:
+              entity_id: !input den_lights
+            data:
+              brightness_pct: 10
+      
+      # TV on with door open during evening
+      - conditions:
+          - condition: template
+            value_template: "{{ not is_daytime and is_tv_state_change and is_tv_on and is_door_open }}"
+        sequence:
+          - service: light.turn_on
+            target:
+              entity_id: !input den_lights
+            data:
+              brightness_pct: 60
           - delay:
               minutes: !input door_timer_duration
           - service: light.turn_on
@@ -181,92 +219,61 @@ action:
               entity_id: !input den_lights
             data:
               brightness_pct: 10
+      
+      # After midnight
+      - conditions:
+          - condition: template
+            value_template: "{{ is_after_lights_off_time and not is_tv_on and trigger.entity_id != door_sensor }}"
+        sequence:
+          - service: light.turn_off
+            target:
+              entity_id: !input den_lights
+      
+      # Dimming period (10:30PM-12AM)
+      - conditions:
+          - condition: template
+            value_template: "{{ is_after_dimming_time and not is_after_lights_off_time and not is_tv_on and trigger.entity_id != door_sensor }}"
+        sequence:
+          - variables:
+              dim_time: "{{ strptime(dimming_start_time, '%H:%M:%S') }}"
+              off_time: "{{ strptime(lights_off_time, '%H:%M:%S') }}"
+              adjusted_off_time: "{{ off_time if off_time >= dim_time else off_time + timedelta(days=1) }}"
+              total_dimming_period: "{{ (adjusted_off_time - dim_time).total_seconds() }}"
+              
+              current: "{{ now() }}"
+              current_dt: "{{ current.replace(hour=current.hour, minute=current.minute, second=current.second) }}"
+              adjusted_current_dt: "{{ current_dt if current_dt >= dim_time else current_dt + timedelta(days=1) }}"
+              time_since_dimming_start: "{{ (adjusted_current_dt - dim_time).total_seconds() }}"
+              
+              dimming_progress: "{{ time_since_dimming_start / total_dimming_period }}"
+              dimming_brightness: "{{ max(10, 100 - (dimming_progress * 90)) | round(0) }}"
+          - service: light.turn_on
+            target:
+              entity_id: !input den_lights
+            data:
+              brightness_pct: "{{ dimming_brightness }}"
+      
+      # Daytime - keep lights off
+      - conditions:
+          - condition: template
+            value_template: "{{ is_daytime and trigger.entity_id != door_sensor }}"
+        sequence:
+          - service: light.turn_off
+            target:
+              entity_id: !input den_lights
+      
+      # Standard evening time
+      - conditions:
+          - condition: template
+            value_template: "{{ is_evening_time or (trigger.platform == 'sun' and trigger.event == 'sunset' and not is_pre_sunset_time) }}"
+        sequence:
+          - service: light.turn_on
+            target:
+              entity_id: !input den_lights
+            data:
+              brightness_pct: 100
+    
+    # Default - do nothing if no condition matches
+    default: []
 
-  # Daytime TV state changes
-  - if:
-      condition: "{{ is_daytime and trigger.entity_id == chromecast }}"
-    then:
-      - service: light.turn_off
-        target:
-          entity_id: !input den_lights
-
-  # Evening/Night TV handling without door open
-  - if:
-      condition: "{{ not is_daytime and trigger.entity_id == chromecast and is_tv_on and not is_door_open }}"
-    then:
-      - service: light.turn_on
-        target:
-          entity_id: !input den_lights
-        data:
-          brightness_pct: 10
-
-  # TV with door open (evening only)
-  - if:
-      condition: "{{ not is_daytime and trigger.entity_id == chromecast and is_tv_on and is_door_open }}"
-    then:
-      - service: light.turn_on
-        target:
-          entity_id: !input den_lights
-        data:
-          brightness_pct: 60
-      - delay:
-          minutes: !input door_timer_duration
-      - service: light.turn_on
-        target:
-          entity_id: !input den_lights
-        data:
-          brightness_pct: 10
-
-  # After midnight
-  - if:
-      condition: "{{ is_after_lights_off_time and not is_tv_on and trigger.entity_id != door_sensor }}"
-    then:
-      - service: light.turn_off
-        target:
-          entity_id: !input den_lights
-
-  # Dimming period (10:30PM-12AM)
-  - if:
-      condition: "{{ is_after_dimming_time and not is_after_lights_off_time and not is_tv_on and trigger.entity_id != door_sensor }}"
-    then:
-      - variables:
-          total_dimming_period: >
-            {% set dim_time = strptime(dimming_start_time, '%H:%M:%S') %}
-            {% set off_time = strptime(lights_off_time, '%H:%M:%S') %}
-            {% if off_time < dim_time %}
-              {% set off_time = off_time + timedelta(days=1) %}
-            {% endif %}
-            {{ (off_time - dim_time).total_seconds() }}
-          time_since_dimming_start: >
-            {% set dim_time = strptime(dimming_start_time, '%H:%M:%S') %}
-            {% set current = now() %}
-            {% set current_time = current.replace(hour=current.hour, minute=current.minute, second=current.second) %}
-            {% if current_time < dim_time %}
-              {% set current_time = current_time + timedelta(days=1) %}
-            {% endif %}
-            {{ (current_time - dim_time).total_seconds() }}
-          dimming_progress: "{{ time_since_dimming_start / total_dimming_period }}"
-          dimming_brightness: "{{ max(10, 100 - (dimming_progress * 90)) | round(0) }}"
-      - service: light.turn_on
-        target:
-          entity_id: !input den_lights
-        data:
-          brightness_pct: "{{ dimming_brightness }}"
-
-  # Daytime - keep lights off
-  - if:
-      condition: "{{ is_daytime and trigger.entity_id != door_sensor }}"
-    then:
-      - service: light.turn_off
-        target:
-          entity_id: !input den_lights
-
-  # Standard evening time
-  - if:
-      condition: "{{ is_evening_time }}"
-    then:
-      - service: light.turn_on
-        target:
-          entity_id: !input den_lights
-        data:
-          brightness_pct: 100
+mode: single
