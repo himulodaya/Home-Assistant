@@ -48,7 +48,7 @@ blueprint:
       selector:
         time: {}
 
-# Multiple triggers - these are what activate our automation
+# Triggers
 trigger:
   - platform: sun
     event: sunset
@@ -67,249 +67,114 @@ trigger:
   - platform: state
     entity_id: !input door_sensor
 
-# Main action sequence
+# No global conditions
+condition: []
+
+# Actions
 action:
-  # For pre-sunset gradual turn on
-  - alias: "Handle pre-sunset gradual turn on"
-    if:
-      - condition: sun
-        before: sunset
-        before_offset: "00:00:00"
-      - condition: sun
-        after: sunset
-        after_offset: "-00:20:00"
-      - condition: trigger
-        id: pre_sunset
-    then:
-      - service: light.turn_on
-        target:
-          entity_id: !input den_lights
-        data:
-          brightness_pct: 50
-
   # For door opening
-  - alias: "Handle door opening"
-    if:
-      - condition: trigger
-        platform: state
-        entity_id: !input door_sensor
-        to: "on"
-    then:
-      - choose:
-          # Daytime door opening
-          - conditions:
-              - condition: sun
-                after: sunrise
-                after_offset: "00:15:00"
-              - condition: sun
-                before: sunset
-                before_offset: "-00:20:00"
-            sequence:
-              - service: light.turn_on
-                target:
-                  entity_id: !input den_lights
-                data:
-                  brightness_pct: 100
-              - delay:
-                  minutes: !input door_timer_duration
+  - choose:
+      # Door just opened
+      - conditions:
+          - condition: template
+            value_template: "{{ trigger.entity_id == door_sensor and trigger.to_state.state == 'on' }}"
+        sequence:
+          # Turn on lights at appropriate brightness
+          - service: light.turn_on
+            target:
+              entity_id: !input den_lights
+            data:
+              brightness_pct: >
+                {% if now().timestamp() < state_attr('sun.sun', 'next_setting').timestamp() and 
+                     now().timestamp() > state_attr('sun.sun', 'next_rising').timestamp() %}
+                  100
+                {% elif is_state(chromecast, 'on') or is_state(chromecast, 'playing') %}
+                  60
+                {% else %}
+                  100
+                {% endif %}
+                
+          # Add timer for reverting if during daytime
+          - delay:
+              minutes: !input door_timer_duration
+                
+          # Revert based on time and TV status
+          - service: light.turn_{{ 
+              'on' if (
+                (now().timestamp() > state_attr('sun.sun', 'next_setting').timestamp() and
+                 now().timestamp() < state_attr('sun.sun', 'next_rising').timestamp() and
+                 now().time() < strptime(lights_off_time, '%H:%M:%S').time() and
+                 (is_state(chromecast, 'on') or is_state(chromecast, 'playing')))
+              ) else 'off' }}
+            target:
+              entity_id: !input den_lights
+            data:
+              brightness_pct: 10
+              
+      # TV turned on/off
+      - conditions:
+          - condition: template
+            value_template: "{{ trigger.entity_id == chromecast }}"
+        sequence:
+          # If during daytime, always keep lights off
+          - if:
+              condition: template
+              value_template: "{{ now().timestamp() < state_attr('sun.sun', 'next_setting').timestamp() and 
+                                  now().timestamp() > state_attr('sun.sun', 'next_rising').timestamp() }}"
+            then:
               - service: light.turn_off
                 target:
                   entity_id: !input den_lights
-                  
-          # Evening door opening with TV on
-          - conditions:
-              - condition: sun
-                after: sunset
-              - condition: sun
-                before: sunrise
-              - condition: state
-                entity_id: !input chromecast
-                state:
-                  - "on"
-                  - "playing"
-            sequence:
-              - service: light.turn_on
-                target:
-                  entity_id: !input den_lights
-                data:
-                  brightness_pct: 60
-              - delay:
-                  minutes: !input door_timer_duration
-              - service: light.turn_on
+            # If evening/night, set appropriate brightness
+            else:
+              - service: light.turn_{{ 'on' if (is_state(chromecast, 'on') or is_state(chromecast, 'playing')) else 'off' }}
                 target:
                   entity_id: !input den_lights
                 data:
                   brightness_pct: 10
                   
-          # Evening door opening without TV on
-          - conditions:
-              - condition: sun
-                after: sunset
-              - condition: sun
-                before: sunrise
-              - condition: time
-                before: !input dimming_start_time
-            sequence:
-              - service: light.turn_on
-                target:
-                  entity_id: !input den_lights
-                data:
-                  brightness_pct: 100
-                  
-          # Late night door opening
-          - conditions:
-              - condition: time
-                after: !input lights_off_time
-              - condition: sun
-                before: sunrise
-            sequence:
-              - service: light.turn_on
-                target:
-                  entity_id: !input den_lights
-                data:
-                  brightness_pct: 100
-              - delay:
-                  minutes: !input door_timer_duration
-              - choose:
-                  - conditions:
-                      - condition: state
-                        entity_id: !input chromecast
-                        state:
-                          - "on"
-                          - "playing"
-                    sequence:
-                      - service: light.turn_on
-                        target:
-                          entity_id: !input den_lights
-                        data:
-                          brightness_pct: 10
-                default:
-                  - service: light.turn_off
-                    target:
-                      entity_id: !input den_lights
-
-  # For TV state changes
-  - alias: "Handle TV state changes"
-    if:
-      - condition: trigger
-        platform: state
-        entity_id: !input chromecast
-    then:
-      - choose:
-          # TV on during daytime - keep lights off
-          - conditions:
-              - condition: sun
-                after: sunrise
-                after_offset: "00:15:00"
-              - condition: sun
-                before: sunset
-                before_offset: "-00:20:00"
-            sequence:
-              - service: light.turn_off
-                target:
-                  entity_id: !input den_lights
-                  
-          # TV on during evening - 10% brightness
-          - conditions:
-              - condition: sun
-                after: sunset
-              - condition: sun
-                before: sunrise
-              - condition: state
-                entity_id: !input chromecast
-                state:
-                  - "on"
-                  - "playing"
-              - condition: state
-                entity_id: !input door_sensor
-                state: "off"
-            sequence:
-              - service: light.turn_on
-                target:
-                  entity_id: !input den_lights
-                data:
-                  brightness_pct: 10
-
-  # For normal sunset event
-  - alias: "Handle sunset"
-    if:
-      - condition: trigger
-        platform: sun
-        event: sunset
-      - condition: sun
-        after: sunset
-        after_offset: "00:00:00"
-    then:
-      - service: light.turn_on
-        target:
-          entity_id: !input den_lights
-        data:
-          brightness_pct: 100
-
-  # For normal sunrise event
-  - alias: "Handle sunrise"
-    if:
-      - condition: trigger
-        platform: sun
-        event: sunrise
-      - condition: sun
-        after: sunrise
-        after_offset: "00:15:00"
-    then:
-      - service: light.turn_off
-        target:
-          entity_id: !input den_lights
-
-  # For dimming start time
-  - alias: "Handle dimming start"
-    if:
-      - condition: trigger
-        platform: time
-        at: !input dimming_start_time
-    then:
-      - choose:
-          - conditions:
-              - condition: state
-                entity_id: !input chromecast
-                state:
-                  - "on"
-                  - "playing"
-            sequence:
-              - service: light.turn_on
-                target:
-                  entity_id: !input den_lights
-                data:
-                  brightness_pct: 10
-            default:
-              - service: light.turn_on
-                target:
-                  entity_id: !input den_lights
-                data:
-                  brightness_pct: 75
-
-  # For lights off time
-  - alias: "Handle lights off time"
-    if:
-      - condition: trigger
-        platform: time
-        at: !input lights_off_time
-    then:
-      - choose:
-          - conditions:
-              - condition: state
-                entity_id: !input chromecast
-                state:
-                  - "on"
-                  - "playing"
-            sequence:
-              - service: light.turn_on
-                target:
-                  entity_id: !input den_lights
-                data:
-                  brightness_pct: 10
-            default:
-              - service: light.turn_off
-                target:
-                  entity_id: !input den_lights
-
-mode: single
+      # Sunset
+      - conditions:
+          - condition: template
+            value_template: "{{ trigger.platform == 'sun' and trigger.event == 'sunset' }}"
+        sequence:
+          - service: light.turn_on
+            target:
+              entity_id: !input den_lights
+            data:
+              brightness_pct: 100
+              
+      # Sunrise
+      - conditions:
+          - condition: template
+            value_template: "{{ trigger.platform == 'sun' and trigger.event == 'sunrise' }}"
+        sequence:
+          - service: light.turn_off
+            target:
+              entity_id: !input den_lights
+              
+      # Dimming start time
+      - conditions:
+          - condition: template
+            value_template: "{{ trigger.platform == 'time' and trigger.at == dimming_start_time }}"
+        sequence:
+          - service: light.turn_on
+            target:
+              entity_id: !input den_lights
+            data:
+              brightness_pct: "{{ 10 if (is_state(chromecast, 'on') or is_state(chromecast, 'playing')) else 50 }}"
+              
+      # Lights off time
+      - conditions:
+          - condition: template
+            value_template: "{{ trigger.platform == 'time' and trigger.at == lights_off_time }}"
+        sequence:
+          - service: light.turn_{{ 'on' if (is_state(chromecast, 'on') or is_state(chromecast, 'playing')) else 'off' }}
+            target:
+              entity_id: !input den_lights
+            data:
+              brightness_pct: 10
+              
+    default:
+      - delay:
+          milliseconds: 1
