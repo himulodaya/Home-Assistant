@@ -1,33 +1,6 @@
-# Pre-sunset gradual turn on (20 minutes before sunset)
-      - conditions: "{{ is_pre_sunset_time and trigger.platform == 'sun' and trigger.event == 'sunset' }}"
-        sequence:
-          - variables:
-              # Calculate brightness based on time until sunset
-              time_to_sunset: >
-                {% set sunset_time = as_timestamp(state_attr('sun.sun', 'next_setting')) %}
-                {% set current_time = as_timestamp(now()) %}
-                {{ sunset_time - current_time }}
-              sunset_progress: "{{ 1 - (time_to_sunset / 1200) }}"  # 1200 seconds = 20 minutes
-              sunset_brightness: "{{ max(10, (sunset_progress * 100)) | round(0) }}"
-          
-          - service: light.turn_on
-            target:
-              entity_id: !input den_lights
-            data:
-              brightness_pct: "{{ sunset_brightness }}"
-          - service: system_log.write
-            data:
-              message: "Den lights: Pre-sunset gradual turn on - {{ sunset_brightness }}% brightness"
-              level: infoblueprint:
+blueprint:
   name: Den Lights Automation
-  description: >
-    Controls den lights based on time, media player status, and door sensor.
-    - Turns on at sunset and off at sunrise
-    - Brightness adjusts based on TV/Chromecast status and door position
-    - Door opening sets lights to 60% for 5 minutes, then returns to previous state
-    - Gradually dims after 10:30 PM and turns off at midnight
-    - Remains on if TV is active
-    - Turns on when door opens regardless of time
+  description: Controls den lights based on time, media player status, and door sensor.
   domain: automation
   input:
     den_lights:
@@ -136,6 +109,24 @@ action:
 
   # Decision tree for lighting
   - choose:
+      # Pre-sunset gradual turn on (20 minutes before sunset)
+      - conditions: "{{ is_pre_sunset_time and trigger.platform == 'sun' and trigger.event == 'sunset' }}"
+        sequence:
+          - variables:
+              # Calculate brightness based on time until sunset
+              time_to_sunset: >
+                {% set sunset_time = as_timestamp(state_attr('sun.sun', 'next_setting')) %}
+                {% set current_time = as_timestamp(now()) %}
+                {{ sunset_time - current_time }}
+              sunset_progress: "{{ 1 - (time_to_sunset / 1200) }}"  # 1200 seconds = 20 minutes
+              sunset_brightness: "{{ max(10, (sunset_progress * 100)) | round(0) }}"
+          
+          - service: light.turn_on
+            target:
+              entity_id: !input den_lights
+            data:
+              brightness_pct: "{{ sunset_brightness }}"
+
       # Door has just opened - set timer and prioritize visibility
       - conditions: "{{ trigger.entity_id == door_sensor and trigger.to_state.state == 'on' }}"
         sequence:
@@ -156,10 +147,6 @@ action:
               entity_id: !input den_lights
             data:
               brightness_pct: "{{ brightness_level }}"
-          - service: system_log.write
-            data:
-              message: "Den lights: Door opened - {{ brightness_level }}% brightness for {{ door_timer_duration }} minutes"
-              level: info
           
           # Start a timer to revert brightness if needed
           - choose:
@@ -176,10 +163,6 @@ action:
                           - service: light.turn_off
                             target:
                               entity_id: !input den_lights
-                          - service: system_log.write
-                            data:
-                              message: "Den lights: Door timer ended during daytime - turning off lights"
-                              level: info
                       # If after midnight but before sunrise, and TV is on
                       - conditions: "{{ is_after_lights_off_time and is_tv_on }}"
                         sequence:
@@ -188,19 +171,11 @@ action:
                               entity_id: !input den_lights
                             data:
                               brightness_pct: 10
-                          - service: system_log.write
-                            data:
-                              message: "Den lights: Door timer ended after midnight with TV on - 10% brightness"
-                              level: info
                     default:
                       # After midnight, no TV - turn off
                       - service: light.turn_off
                         target:
                           entity_id: !input den_lights
-                      - service: system_log.write
-                        data:
-                          message: "Den lights: Door timer ended after midnight - turning off lights"
-                          level: info
               # If it's evening with TV on, revert to 10% after timer
               - conditions: "{{ not is_daytime and not is_after_lights_off_time and is_tv_on }}"
                 sequence:
@@ -211,10 +186,6 @@ action:
                       entity_id: !input den_lights
                     data:
                       brightness_pct: 10
-                  - service: system_log.write
-                    data:
-                      message: "Den lights: Door timer ended during evening with TV on - reverting to 10% brightness"
-                      level: info
             # If it's evening time with no TV - no timer needed, lights should stay on at 100%
 
       # Daytime handling for TV state changes - ignore TV during daytime
@@ -223,10 +194,6 @@ action:
           - service: light.turn_off
             target:
               entity_id: !input den_lights
-          - service: system_log.write
-            data:
-              message: "Den lights: TV state changed during daytime - keeping lights off"
-              level: info
               
       # Evening/Night TV handling
       - conditions: "{{ not is_daytime and trigger.entity_id == chromecast and is_tv_on and not is_door_open }}"
@@ -236,10 +203,6 @@ action:
               entity_id: !input den_lights
             data:
               brightness_pct: 10
-          - service: system_log.write
-            data:
-              message: "Den lights: TV turned on during evening - setting to 10% brightness"
-              level: info
               
       # TV state changed to ON while door is open (evening only)
       - conditions: "{{ not is_daytime and trigger.entity_id == chromecast and is_tv_on and is_door_open }}"
@@ -249,10 +212,6 @@ action:
               entity_id: !input den_lights
             data:
               brightness_pct: 60
-          - service: system_log.write
-            data:
-              message: "Den lights: TV on with door open during evening - setting to 60% brightness"
-              level: info
           # Start timer to return to 10% after door activity
           - delay:
               minutes: !input door_timer_duration
@@ -261,21 +220,13 @@ action:
               entity_id: !input den_lights
             data:
               brightness_pct: 10
-          - service: system_log.write
-            data:
-              message: "Den lights: Door/TV timer ended - returning to 10% brightness"
-              level: info
-      
+
       # After midnight - turn off lights unless TV is on or door just opened
       - conditions: "{{ is_after_lights_off_time and not is_tv_on and trigger.entity_id != door_sensor }}"
         sequence:
           - service: light.turn_off
             target:
               entity_id: !input den_lights
-          - service: system_log.write
-            data:
-              message: "Den lights: After midnight - lights off"
-              level: info
       
       # After dimming time but before midnight - dim lights unless TV is on
       - conditions: "{{ is_after_dimming_time and not is_after_lights_off_time and not is_tv_on and trigger.entity_id != door_sensor }}"
@@ -305,10 +256,6 @@ action:
               entity_id: !input den_lights
             data:
               brightness_pct: "{{ dimming_brightness }}"
-          - service: system_log.write
-            data:
-              message: "Den lights: Dimming in progress - {{ dimming_brightness }}% brightness"
-              level: info
 
       # Daytime - keep lights off regardless of TV state, unless door just opened
       - conditions: "{{ is_daytime and trigger.entity_id != door_sensor }}"
@@ -316,10 +263,6 @@ action:
           - service: light.turn_off
             target:
               entity_id: !input den_lights
-          - service: system_log.write
-            data:
-              message: "Den lights: Daytime - lights off (TV status ignored during day)"
-              level: info
 
     # Default action - standard evening time (after sunset, before dimming time)
     default:
@@ -330,7 +273,3 @@ action:
               entity_id: !input den_lights
             data:
               brightness_pct: 100
-          - service: system_log.write
-            data:
-              message: "Den lights: Normal evening - 100% brightness"
-              level: info
