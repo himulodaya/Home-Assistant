@@ -1,176 +1,120 @@
 blueprint:
   name: Den Lights Smart Automation
   description: |
-    Automate Den lights based on time of day, TV state, door sensor, and sunrise/sunset.
-    Includes adaptive brightness control and state reversion logic.
+    Automates den lights based on time, media player state, door sensor, and ambient conditions.
+    - Supports brightness transitions from 10% to 100% during sunset.
+    - Gradual dimming from 22:30 to midnight.
+    - Adjusts lighting based on TV (media_player) and door sensor.
   domain: automation
   input:
-    light_entity:
-      name: Den Light
+    light_target:
+      name: Light
       selector:
-        entity:
-          domain: light
-
+        target:
+          entity:
+            domain: light
     media_player:
-      name: TV / Media Player
+      name: Media Player (TV)
       selector:
         entity:
           domain: media_player
-
     door_sensor:
       name: Door Sensor
       selector:
         entity:
           domain: binary_sensor
-          device_class: door
-
-    sunrise_offset:
-      name: Sunrise Offset (mins)
-      default: 0
+    sunrise:
+      name: Sunrise Time
+      default: sunrise
       selector:
-        number:
-          min: -120
-          max: 120
-          unit_of_measurement: minutes
-
-    sunset_offset:
-      name: Sunset Offset (mins)
-      default: 0
+        entity:
+          domain: sun
+    sunset:
+      name: Sunset Time
+      default: sunset
       selector:
-        number:
-          min: -120
-          max: 120
-          unit_of_measurement: minutes
+        entity:
+          domain: sun
 
-    door_trigger_duration:
-      name: Door Trigger Light On Duration (seconds)
-      default: 60
-      selector:
-        number:
-          min: 10
-          max: 600
-          unit_of_measurement: seconds
+automation:
+  - alias: Den Lights Based on Time, TV and Door
+    trigger:
+      - platform: state
+        entity_id: !input media_player
+      - platform: state
+        entity_id: !input door_sensor
+        to: 'on'
+      - platform: time_pattern
+        minutes: "/5"
 
-mode: single
+    condition: []
 
-variables:
-  light: !input light_entity
-  tv: !input media_player
-  door: !input door_sensor
-  sunrise_offset: !input sunrise_offset
-  sunset_offset: !input sunset_offset
-  door_trigger_duration: !input door_trigger_duration
+    action:
+      - choose:
+          - conditions:
+              - condition: state
+                entity_id: !input door_sensor
+                state: 'on'
+            sequence:
+              - service: light.turn_on
+                target: !input light_target
+                data:
+                  brightness_pct: 60
+              - delay: "00:01:00"
+              - choose:
+                  - conditions:
+                      - condition: state
+                        entity_id: !input media_player
+                        state: 'on'
+                    sequence:
+                      - service: light.turn_on
+                        target: !input light_target
+                        data:
+                          brightness_pct: 10
+                  - conditions:
+                      - condition: state
+                        entity_id: !input media_player
+                        state: 'off'
+                    sequence:
+                      - service: light.turn_off
+                        target: !input light_target
 
-trigger:
-  - platform: state
-    entity_id: !input door_sensor
-    to: 'on'
-  - platform: state
-    entity_id: !input media_player
+          - conditions:
+              - condition: state
+                entity_id: !input media_player
+                state: 'on'
+              - condition: time
+                after: "00:00:00"
+                before: "06:00:00"
+            sequence:
+              - service: light.turn_on
+                target: !input light_target
+                data:
+                  brightness_pct: 10
 
-condition: []
+          - conditions:
+              - condition: sun
+                after: sunset
+                before: "22:30:00"
+              - condition: state
+                entity_id: !input media_player
+                state: 'off'
+            sequence:
+              - service: light.turn_on
+                target: !input light_target
+                data:
+                  brightness_pct: 100
 
-action:
-  - choose:
-      - conditions:
-          - condition: state
-            entity_id: !input door_sensor
-            state: 'on'
-        sequence:
-          - service: light.turn_on
-            data:
-              entity_id: !input light_entity
-              brightness_pct: 60
-          - delay:
-              seconds: !input door_trigger_duration
-          - choose:
-              - conditions:
-                  - condition: state
-                    entity_id: !input media_player
-                    state: 'on'
-                sequence:
-                  - service: light.turn_on
-                    data:
-                      entity_id: !input light_entity
-                      brightness_pct: 10
-              - conditions:
-                  - condition: state
-                    entity_id: !input media_player
-                    state: 'off'
-                sequence:
-                  - service: light.turn_off
-                    data:
-                      entity_id: !input light_entity
-      - conditions:
-          - condition: state
-            entity_id: !input media_player
-            state: 'on'
-        sequence:
-          - choose:
-              - conditions:
-                  - condition: time
-                    after: '00:00:00'
-                    before: '06:00:00'
-                sequence:
-                  - service: light.turn_on
-                    data:
-                      entity_id: !input light_entity
-                      brightness_pct: 10
-              - conditions:
-                  - condition: sun
-                    after: sunset
-                    after_offset: !input sunset_offset
-                  - condition: time
-                    after: '18:00:00'
-                    before: '22:30:00'
-                sequence:
-                  - service: light.turn_on
-                    data:
-                      entity_id: !input light_entity
-                      brightness_pct: 10
-      - conditions:
-          - condition: state
-            entity_id: !input media_player
-            state: 'off'
-        sequence:
-          - choose:
-              - conditions:
-                  - condition: time
-                    after: '00:00:00'
-                    before: '06:00:00'
-                sequence:
-                  - service: light.turn_off
-                    data:
-                      entity_id: !input light_entity
-              - conditions:
-                  - condition: sun
-                    after: sunset
-                    after_offset: !input sunset_offset
-                  - condition: time
-                    after: '18:00:00'
-                    before: '22:30:00'
-                sequence:
-                  - service: light.turn_on
-                    data:
-                      entity_id: !input light_entity
-                      brightness_pct: 100
-              - conditions:
-                  - condition: time
-                    after: '22:30:00'
-                    before: '00:00:00'
-                sequence:
-                  - service: light.turn_on
-                    data:
-                      entity_id: !input light_entity
-                      brightness_pct: 10
-              - conditions:
-                  - condition: sun
-                    before: sunrise
-                    before_offset: !input sunrise_offset
-                  - condition: time
-                    after: '06:00:00'
-                    before: '08:00:00'
-                sequence:
-                  - service: light.turn_off
-                    data:
-                      entity_id: !input light_entity
+          - conditions:
+              - condition: time
+                after: "22:30:00"
+                before: "00:00:00"
+            sequence:
+              - service: light.turn_on
+                target: !input light_target
+                data:
+                  brightness_pct: 10
+
+        default:
+          - service: light.turn_off
+            target: !input light_target
