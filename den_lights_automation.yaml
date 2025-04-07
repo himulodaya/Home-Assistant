@@ -1,120 +1,315 @@
 blueprint:
-  name: Den Lights Smart Automation
-  description: |
-    Automates den lights based on time, media player state, door sensor, and ambient conditions.
-    - Supports brightness transitions from 10% to 100% during sunset.
-    - Gradual dimming from 22:30 to midnight.
-    - Adjusts lighting based on TV (media_player) and door sensor.
+  name: Den Lights Automation
+  description: Controls den lights based on time of day, TV status, and door sensor.
   domain: automation
   input:
-    light_target:
-      name: Light
+    den_lights:
+      name: Den Lights
+      description: Select the den lights to control
       selector:
-        target:
-          entity:
-            domain: light
-    media_player:
-      name: Media Player (TV)
+        entity:
+          domain: light
+          multiple: true
+    chromecast:
+      name: Living Room Chromecast/TV
+      description: The media player entity for living room TV
+      default: media_player.living_room_tv_2
       selector:
         entity:
           domain: media_player
     door_sensor:
-      name: Door Sensor
+      name: Main Door Sensor
+      description: The sensor that indicates if the door is open
+      default: binary_sensor.main_door
       selector:
         entity:
           domain: binary_sensor
-    sunrise:
-      name: Sunrise Time
-      default: sunrise
+    door_timer_duration:
+      name: Door Open Brightness Duration
+      description: How long to keep lights at higher brightness after door opens (in minutes)
+      default: 5
       selector:
-        entity:
-          domain: sun
-    sunset:
-      name: Sunset Time
-      default: sunset
+        number:
+          min: 1
+          max: 30
+          unit_of_measurement: minutes
+          mode: slider
+          step: 1
+    dimming_start_time:
+      name: Time to Start Dimming
+      description: Time to start reducing brightness
+      default: "22:30:00"
       selector:
-        entity:
-          domain: sun
+        time: {}
+    lights_off_time:
+      name: Time to Turn Off Lights
+      description: Time to completely turn off lights
+      default: "00:00:00"
+      selector:
+        time: {}
 
-automation:
-  - alias: Den Lights Based on Time, TV and Door
-    trigger:
-      - platform: state
-        entity_id: !input media_player
-      - platform: state
+# Multiple triggers - these are what activate our automation
+trigger:
+  - platform: sun
+    event: sunset
+    offset: "-00:20:00"
+  - platform: sun
+    event: sunset
+  - platform: sun
+    event: sunrise
+    offset: "00:15:00"
+  - platform: time
+    at: !input dimming_start_time
+  - platform: time
+    at: !input lights_off_time
+  - platform: state
+    entity_id: !input chromecast
+  - platform: state
+    entity_id: !input door_sensor
+
+# Main action sequence
+action:
+  # For pre-sunset gradual turn on
+  - alias: "Handle pre-sunset gradual turn on"
+    if:
+      - condition: sun
+        before: sunset
+        before_offset: "00:00:00"
+      - condition: sun
+        after: sunset
+        after_offset: "-00:20:00"
+      - condition: trigger
+        id: pre_sunset
+    then:
+      - service: light.turn_on
+        target:
+          entity_id: !input den_lights
+        data:
+          brightness_pct: 50
+
+  # For door opening
+  - alias: "Handle door opening"
+    if:
+      - condition: trigger
+        platform: state
         entity_id: !input door_sensor
-        to: 'on'
-      - platform: time_pattern
-        minutes: "/5"
-
-    condition: []
-
-    action:
+        to: "on"
+    then:
       - choose:
+          # Daytime door opening
           - conditions:
-              - condition: state
-                entity_id: !input door_sensor
-                state: 'on'
+              - condition: sun
+                after: sunrise
+                after_offset: "00:15:00"
+              - condition: sun
+                before: sunset
+                before_offset: "-00:20:00"
             sequence:
               - service: light.turn_on
-                target: !input light_target
+                target:
+                  entity_id: !input den_lights
                 data:
-                  brightness_pct: 60
-              - delay: "00:01:00"
-              - choose:
-                  - conditions:
-                      - condition: state
-                        entity_id: !input media_player
-                        state: 'on'
-                    sequence:
-                      - service: light.turn_on
-                        target: !input light_target
-                        data:
-                          brightness_pct: 10
-                  - conditions:
-                      - condition: state
-                        entity_id: !input media_player
-                        state: 'off'
-                    sequence:
-                      - service: light.turn_off
-                        target: !input light_target
-
-          - conditions:
-              - condition: state
-                entity_id: !input media_player
-                state: 'on'
-              - condition: time
-                after: "00:00:00"
-                before: "06:00:00"
-            sequence:
-              - service: light.turn_on
-                target: !input light_target
-                data:
-                  brightness_pct: 10
-
+                  brightness_pct: 100
+              - delay:
+                  minutes: !input door_timer_duration
+              - service: light.turn_off
+                target:
+                  entity_id: !input den_lights
+                  
+          # Evening door opening with TV on
           - conditions:
               - condition: sun
                 after: sunset
-                before: "22:30:00"
+              - condition: sun
+                before: sunrise
               - condition: state
-                entity_id: !input media_player
-                state: 'off'
+                entity_id: !input chromecast
+                state:
+                  - "on"
+                  - "playing"
             sequence:
               - service: light.turn_on
-                target: !input light_target
+                target:
+                  entity_id: !input den_lights
+                data:
+                  brightness_pct: 60
+              - delay:
+                  minutes: !input door_timer_duration
+              - service: light.turn_on
+                target:
+                  entity_id: !input den_lights
+                data:
+                  brightness_pct: 10
+                  
+          # Evening door opening without TV on
+          - conditions:
+              - condition: sun
+                after: sunset
+              - condition: sun
+                before: sunrise
+              - condition: time
+                before: !input dimming_start_time
+            sequence:
+              - service: light.turn_on
+                target:
+                  entity_id: !input den_lights
                 data:
                   brightness_pct: 100
-
+                  
+          # Late night door opening
           - conditions:
               - condition: time
-                after: "22:30:00"
-                before: "00:00:00"
+                after: !input lights_off_time
+              - condition: sun
+                before: sunrise
             sequence:
               - service: light.turn_on
-                target: !input light_target
+                target:
+                  entity_id: !input den_lights
+                data:
+                  brightness_pct: 100
+              - delay:
+                  minutes: !input door_timer_duration
+              - choose:
+                  - conditions:
+                      - condition: state
+                        entity_id: !input chromecast
+                        state:
+                          - "on"
+                          - "playing"
+                    sequence:
+                      - service: light.turn_on
+                        target:
+                          entity_id: !input den_lights
+                        data:
+                          brightness_pct: 10
+                default:
+                  - service: light.turn_off
+                    target:
+                      entity_id: !input den_lights
+
+  # For TV state changes
+  - alias: "Handle TV state changes"
+    if:
+      - condition: trigger
+        platform: state
+        entity_id: !input chromecast
+    then:
+      - choose:
+          # TV on during daytime - keep lights off
+          - conditions:
+              - condition: sun
+                after: sunrise
+                after_offset: "00:15:00"
+              - condition: sun
+                before: sunset
+                before_offset: "-00:20:00"
+            sequence:
+              - service: light.turn_off
+                target:
+                  entity_id: !input den_lights
+                  
+          # TV on during evening - 10% brightness
+          - conditions:
+              - condition: sun
+                after: sunset
+              - condition: sun
+                before: sunrise
+              - condition: state
+                entity_id: !input chromecast
+                state:
+                  - "on"
+                  - "playing"
+              - condition: state
+                entity_id: !input door_sensor
+                state: "off"
+            sequence:
+              - service: light.turn_on
+                target:
+                  entity_id: !input den_lights
                 data:
                   brightness_pct: 10
 
-        default:
-          - service: light.turn_off
-            target: !input light_target
+  # For normal sunset event
+  - alias: "Handle sunset"
+    if:
+      - condition: trigger
+        platform: sun
+        event: sunset
+      - condition: sun
+        after: sunset
+        after_offset: "00:00:00"
+    then:
+      - service: light.turn_on
+        target:
+          entity_id: !input den_lights
+        data:
+          brightness_pct: 100
+
+  # For normal sunrise event
+  - alias: "Handle sunrise"
+    if:
+      - condition: trigger
+        platform: sun
+        event: sunrise
+      - condition: sun
+        after: sunrise
+        after_offset: "00:15:00"
+    then:
+      - service: light.turn_off
+        target:
+          entity_id: !input den_lights
+
+  # For dimming start time
+  - alias: "Handle dimming start"
+    if:
+      - condition: trigger
+        platform: time
+        at: !input dimming_start_time
+    then:
+      - choose:
+          - conditions:
+              - condition: state
+                entity_id: !input chromecast
+                state:
+                  - "on"
+                  - "playing"
+            sequence:
+              - service: light.turn_on
+                target:
+                  entity_id: !input den_lights
+                data:
+                  brightness_pct: 10
+            default:
+              - service: light.turn_on
+                target:
+                  entity_id: !input den_lights
+                data:
+                  brightness_pct: 75
+
+  # For lights off time
+  - alias: "Handle lights off time"
+    if:
+      - condition: trigger
+        platform: time
+        at: !input lights_off_time
+    then:
+      - choose:
+          - conditions:
+              - condition: state
+                entity_id: !input chromecast
+                state:
+                  - "on"
+                  - "playing"
+            sequence:
+              - service: light.turn_on
+                target:
+                  entity_id: !input den_lights
+                data:
+                  brightness_pct: 10
+            default:
+              - service: light.turn_off
+                target:
+                  entity_id: !input den_lights
+
+mode: single
