@@ -264,8 +264,7 @@ action:
             target:
               entity_id: !input den_lights
 
-    # Default action - standard evening time (after sunset, before dimming time)
-    default:
+      # Standard evening time (after sunset, before dimming time)
       - conditions: "{{ (is_night_time or trigger.platform == 'sun' and trigger.event == 'sunset') and not is_after_dimming_time and not is_after_lights_off_time }}"
         sequence:
           - service: light.turn_on
@@ -273,3 +272,10 @@ action:
               entity_id: !input den_lights
             data:
               brightness_pct: 100
+
+    # Default action - do nothing if no condition matches
+    default:
+      - service: persistent_notification.create
+        data:
+          title: "Den Lights Automation"
+          message: "No condition matched in the automation."
